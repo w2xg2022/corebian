@@ -1,77 +1,59 @@
 #!/bin/bash
 # corebian-install --- Install the running Corebian system to the internal eMMC.
 #
-# Unlike ophub's armbian-install: these boxes' stock u-boot only has `bootm`, not `booti`,
-# and it reads the *Amlogic EPT* (proprietary partition table), NOT an MBR/GPT. So we must:
-#   - use ampart to create named EPT partitions (bootfs + rootfs) that both the Amlogic
-#     MMC driver and the stock u-boot can see (as /dev/bootfs, /dev/rootfs and mmc 1:N),
-#   - write a bootm cfgload to bootfs (the box env's cfgloademmc scans eMMC for cfgload).
-#
-# The Amlogic driver only reads the EPT at boot, so this is a TWO-PHASE install:
-#   Phase 1: ampart creates the EPT -> you REBOOT (still from USB) -> re-run this script.
-#   Phase 2: format + copy rootfs + write boot assets.
+# METHOD: "old-school" factory-partition reuse (per 7Ji's aminstall).
+# e900v22c-class boxes (like Phicomm / Xiaomi) have a locked / proprietary Amlogic
+# partition table that ampart CANNOT modify -- the stock u-boot won't honor the
+# changes, so any repartitioned FAT is invisible to `fatload mmc`. Instead we REUSE
+# two existing factory Amlogic named partitions:
+#   - a FAT "boot" partition (default /dev/system) for cfgload + kernel.img + dtb.img
+#   - an ext4 "rootfs" partition (default /dev/data) for the root filesystem
+# The box env's cfgloademmc scans mmc 1:1..1F for `cfgload` -> bootm. Because these are
+# FACTORY partitions, the stock u-boot reads them fine (unlike ampart-created ones).
 #
 # Requires assets bundled in the rootfs: /usr/lib/corebian/boot/{kernel.img,dtb.img,cfgload.txt,board.conf}
 set -e
 [ "$(id -u)" = 0 ] || { echo "Must run as root"; exit 1; }
 
-DEV_EMMC="/dev/mmcblk0"
 BOOTSRC="/usr/lib/corebian/boot"
 DIR="/mnt/.corebian-install"
-BOOT_DEV="/dev/bootfs"
-ROOT_DEV="/dev/rootfs"
-
-echo "========== Corebian eMMC Installer =========="
-[ -b "$DEV_EMMC" ] || { echo "[x] eMMC not found: $DEV_EMMC"; exit 1; }
-for t in ampart parted mkfs.vfat mkfs.ext4 rsync mkimage; do command -v $t >/dev/null || { echo "[x] missing tool: $t"; exit 1; }; done
-for f in kernel.img dtb.img cfgload.txt; do [ -f "$BOOTSRC/$f" ] || { echo "[x] missing asset: $BOOTSRC/$f"; exit 1; }; done
 [ -f "$BOOTSRC/board.conf" ] && . "$BOOTSRC/board.conf"
-# EPT layout: a filler pushes bootfs past any non-writable head region (board-specific);
-# bootfs is a FAT boot partition, rootfs fills the rest.
-BOOTGAP="${EMMC_BOOTGAP:-117M}"; BOOTFS_SIZE="${EMMC_BOOTFS:-512M}"
-case "$(findmnt -no SOURCE / 2>/dev/null)" in ${DEV_EMMC}*|${ROOT_DEV}) echo "[x] Already running from eMMC."; exit 1;; esac
+BOOT_PART="${EMMC_BOOT_PART:-/dev/system}"   # factory FAT partition for boot files
+ROOT_PART="${EMMC_ROOT_PART:-/dev/data}"     # factory partition for the rootfs
 
-if [ -b "$BOOT_DEV" ] && [ -b "$ROOT_DEV" ]; then
-    # ---------- PHASE 2 ----------
-    echo "[Phase 2] eMMC EPT partitions found ($BOOT_DEV, $ROOT_DEV)."
-    echo "[1/3] Format bootfs(FAT) + rootfs(ext4)"
-    umount "$BOOT_DEV" "$ROOT_DEV" 2>/dev/null || true
-    mkfs.vfat -F 32 -n BOOT_EMMC "$BOOT_DEV" >/dev/null
-    mkfs.ext4 -F -q -L ROOTFS_EMMC "$ROOT_DEV"
+echo "========== Corebian eMMC Installer (old-school) =========="
+for t in mkfs.vfat mkfs.ext4 rsync mkimage; do command -v $t >/dev/null || { echo "[x] missing tool: $t"; exit 1; }; done
+for f in kernel.img dtb.img cfgload.txt; do [ -f "$BOOTSRC/$f" ] || { echo "[x] missing asset: $BOOTSRC/$f"; exit 1; }; done
+[ -b "$BOOT_PART" ] && [ -b "$ROOT_PART" ] || { echo "[x] factory partitions $BOOT_PART / $ROOT_PART not found"; exit 1; }
+case "$(findmnt -no SOURCE / 2>/dev/null)" in "$BOOT_PART"|"$ROOT_PART") echo "[x] Already running from eMMC."; exit 1;; esac
 
-    echo "[2/3] Copy running rootfs -> $ROOT_DEV (a few minutes)"
-    mkdir -p "$DIR"; mount "$ROOT_DEV" "$DIR"
-    rsync -aHAX \
-      --exclude='/proc/*' --exclude='/sys/*' --exclude='/dev/*' --exclude='/run/*' \
-      --exclude='/tmp/*' --exclude='/mnt/*' --exclude='/media/*' --exclude='/lost+found' \
-      / "$DIR/"
-    mkdir -p "$DIR"/{proc,sys,dev,run,tmp,mnt,media,boot}
-    printf '%s  /  ext4  defaults,noatime,errors=remount-ro  0 1\n' "$ROOT_DEV" > "$DIR/etc/fstab"
-    sync; umount "$DIR"
+echo "!!! WARNING: this reformats $BOOT_PART (-> FAT boot) and $ROOT_PART (-> ext4 rootfs),"
+echo "    wiping internal Android. IRREVERSIBLE! (Stock u-boot / env untouched; USB boot is fallback.)"
+printf "Type YES (uppercase) to continue: "; read -r ok; [ "$ok" = "YES" ] || { echo "Aborted."; exit 1; }
 
-    echo "[3/3] Write bootm boot assets -> $BOOT_DEV"
-    mount "$BOOT_DEV" "$DIR"
-    cp "$BOOTSRC/kernel.img" "$BOOTSRC/dtb.img" "$DIR/"
-    sed "s#setenv bootargs \"#setenv bootargs \"corebian.root=$ROOT_DEV #" "$BOOTSRC/cfgload.txt" > /tmp/.cfgload_emmc.txt
-    mkimage -A arm -O linux -T script -C none -n cfgload -d /tmp/.cfgload_emmc.txt "$DIR/cfgload" >/dev/null
-    rm -f /tmp/.cfgload_emmc.txt; sync; umount "$DIR"; rmdir "$DIR" 2>/dev/null || true
+echo "[1/3] Format $BOOT_PART (FAT32) + $ROOT_PART (ext4)"
+umount "$BOOT_PART" "$ROOT_PART" 2>/dev/null || true
+mkfs.vfat -F 32 -n COREBIAN "$BOOT_PART" >/dev/null
+mkfs.ext4 -F -q -L rootfs "$ROOT_PART"
 
-    echo
-    echo "Done. Power off, REMOVE the USB drive, then power on."
-    echo "The box u-boot's cfgloademmc will find cfgload on the eMMC bootfs -> bootm -> Corebian from eMMC."
-    echo "If it fails, plug the Corebian USB back in to boot normally (fallback)."
-else
-    # ---------- PHASE 1 ----------
-    echo "[Phase 1] Create Amlogic EPT partitions (bootfs + rootfs) with ampart."
-    echo "!!! WARNING: this rewrites the eMMC partition table and wipes internal Android. IRREVERSIBLE!"
-    echo "    (Stock u-boot and USB boot remain as fallback -- not a hard brick.)"
-    printf "Type YES (uppercase) to continue: "; read -r ok; [ "$ok" = "YES" ] || { echo "Aborted."; exit 1; }
+echo "[2/3] Copy running rootfs -> $ROOT_PART (a few minutes)"
+mkdir -p "$DIR"; mount "$ROOT_PART" "$DIR"
+rsync -aHAX \
+  --exclude='/proc/*' --exclude='/sys/*' --exclude='/dev/*' --exclude='/run/*' \
+  --exclude='/tmp/*' --exclude='/mnt/*' --exclude='/media/*' --exclude='/lost+found' \
+  / "$DIR/"
+mkdir -p "$DIR"/{proc,sys,dev,run,tmp,mnt,media,boot}
+printf '%s  /  ext4  defaults,noatime,errors=remount-ro  0 1\n' "$ROOT_PART" > "$DIR/etc/fstab"
+sync; umount "$DIR"
 
-    for i in $(seq 1 30); do umount -f ${DEV_EMMC}p$i 2>/dev/null || true; done
-    # bootgap filler pushes bootfs past the board's non-writable head region.
-    ampart "$DEV_EMMC" --mode dclone bootgap::${BOOTGAP}:1 bootfs::${BOOTFS_SIZE}:1 rootfs::-1:4
+echo "[3/3] Write bootm boot assets -> $BOOT_PART"
+mount "$BOOT_PART" "$DIR"
+cp "$BOOTSRC/kernel.img" "$BOOTSRC/dtb.img" "$DIR/"
+sed "s#setenv bootargs \"#setenv bootargs \"corebian.root=$ROOT_PART #" "$BOOTSRC/cfgload.txt" > /tmp/.cfgload_emmc.txt
+mkimage -A arm -O linux -T script -C none -n cfgload -d /tmp/.cfgload_emmc.txt "$DIR/cfgload" >/dev/null
+rm -f /tmp/.cfgload_emmc.txt; sync; umount "$DIR"; rmdir "$DIR" 2>/dev/null || true
 
-    echo
-    echo "[Phase 1 done] The Amlogic driver only reads the new EPT at boot."
-    echo ">>> REBOOT NOW (it will boot from USB again), then run 'corebian-install' once more to finish. <<<"
-fi
+echo
+echo "Done. Power off, REMOVE the USB drive, then power on."
+echo "The box env's cfgloademmc will find cfgload on $BOOT_PART -> bootm -> Corebian (root on $ROOT_PART)."
+echo "If it fails, plug the Corebian USB back in to boot normally (fallback)."
