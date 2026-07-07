@@ -64,6 +64,13 @@ cp "$BLOB/busybox" "$IRD/usr/bin/busybox"; chmod +x "$IRD/usr/bin/busybox"
 cp "$BLOB/ceglibc/ld-linux-aarch64.so.1" "$BLOB/ceglibc/libc.so.6" "$IRD/lib/"
 cp "$HERE/initramfs/init" "$IRD/init"; chmod +x "$IRD/init"
 bash "$HERE/build/make_kernelimg.sh" "$BLOB/kernel.img" "$IRD" "$WORK/kernel.img"
+# 打包 eMMC 安装器 + 启动素材（供 corebian-install 用）+ 软链接 armbian-install
+install -Dm755 "$HERE/install/corebian-install" "$ROOT/usr/sbin/corebian-install"
+mkdir -p "$ROOT/usr/lib/corebian/boot"
+cp "$WORK/kernel.img"        "$ROOT/usr/lib/corebian/boot/kernel.img"
+cp "$BOARD_DIR/$DTB"         "$ROOT/usr/lib/corebian/boot/dtb.img"
+cp "$BOARD_DIR/$CFGLOAD_TXT" "$ROOT/usr/lib/corebian/boot/cfgload.txt"
+ln -sf corebian-install "$ROOT/usr/sbin/armbian-install"
 
 echo "[5/6] 生成分区镜像"
 mkimage -A arm -O linux -T script -C none -n cfgload \

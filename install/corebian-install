@@ -1,0 +1,66 @@
+#!/bin/bash
+# corebian-install —— 把当前运行的 Corebian 系统装到内部 eMMC。
+#
+# 关键区别于 ophub armbian-install：这些盒子原厂 u-boot 只有 bootm、没有 booti，
+# 所以启动链用 bootm（盒子 env 的 cfgloademmc 会扫 eMMC 上的 cfgload → bootm）。
+# 分区/复制沿用 ophub 的 ampart 方案（已验证可靠），只把写入 BOOT 分区的启动文件换成 bootm 版。
+#
+# 依赖 rootfs 内打包的启动素材：/usr/lib/corebian/boot/{kernel.img,dtb.img,cfgload.txt}
+set -e
+[ "$(id -u)" = 0 ] || { echo "需要 root 运行"; exit 1; }
+
+DEV_EMMC="/dev/mmcblk0"
+BOOTSRC="/usr/lib/corebian/boot"
+DIR="/mnt/.corebian-install"
+
+echo "========== Corebian eMMC 安装 =========="
+[ -b "$DEV_EMMC" ] || { echo "[✗] 找不到 eMMC：$DEV_EMMC"; exit 1; }
+command -v ampart >/dev/null || { echo "[✗] 缺少 ampart"; exit 1; }
+for f in kernel.img dtb.img cfgload.txt; do
+  [ -f "$BOOTSRC/$f" ] || { echo "[✗] 缺少启动素材 $BOOTSRC/$f"; exit 1; }
+done
+ROOTNOW="$(findmnt -no SOURCE / 2>/dev/null)"
+case "$ROOTNOW" in
+  ${DEV_EMMC}*) echo "[✗] 当前已在 eMMC 上运行，无需安装。"; exit 1;;
+esac
+
+echo "!!! 警告：将用 ampart 重分区 $DEV_EMMC，清空内部 Android，不可逆！"
+echo "    （原厂 u-boot 与 U 盘启动仍是后路，不是硬砖）"
+printf "确认请输入大写 YES："; read -r ok
+[ "$ok" = "YES" ] || { echo "已取消。"; exit 1; }
+
+echo "[1/5] 卸载 eMMC 分区并用 ampart 重分区"
+for i in $(seq 1 30); do umount -f ${DEV_EMMC}p$i 2>/dev/null || true; done
+ampart "$DEV_EMMC" --mode dclone data::-1:4
+partprobe "$DEV_EMMC" 2>/dev/null || true; sleep 2
+PART_BOOT="${DEV_EMMC}p1"
+PART_ROOT="${DEV_EMMC}p2"
+[ -b "$PART_BOOT" ] && [ -b "$PART_ROOT" ] || { echo "[✗] ampart 后未见 $PART_BOOT / $PART_ROOT"; exit 1; }
+
+echo "[2/5] 格式化 BOOT(FAT) + ROOTFS(ext4)"
+mkfs.vfat -F 32 -n BOOT_EMMC "$PART_BOOT" >/dev/null
+mkfs.ext4 -F -q -L ROOTFS_EMMC "$PART_ROOT"
+
+echo "[3/5] 复制当前 rootfs → $PART_ROOT（可能几分钟）"
+mkdir -p "$DIR"; mount "$PART_ROOT" "$DIR"
+rsync -aHAX \
+  --exclude='/proc/*' --exclude='/sys/*' --exclude='/dev/*' --exclude='/run/*' \
+  --exclude='/tmp/*'  --exclude='/mnt/*' --exclude='/media/*' --exclude='/lost+found' \
+  / "$DIR/"
+mkdir -p "$DIR"/{proc,sys,dev,run,tmp,mnt,media,boot}
+printf '%s  /  ext4  defaults,noatime,errors=remount-ro  0 1\n' "$PART_ROOT" > "$DIR/etc/fstab"
+sync; umount "$DIR"
+
+echo "[4/5] 写 bootm 启动素材 → $PART_BOOT"
+mount "$PART_BOOT" "$DIR"
+cp "$BOOTSRC/kernel.img" "$BOOTSRC/dtb.img" "$DIR/"
+# 生成 eMMC 版 cfgload：把 root 指向 eMMC 的 rootfs 分区
+sed "s#setenv bootargs \"#setenv bootargs \"corebian.root=$PART_ROOT #" \
+    "$BOOTSRC/cfgload.txt" > /tmp/.cfgload_emmc.txt
+mkimage -A arm -O linux -T script -C none -n cfgload -d /tmp/.cfgload_emmc.txt "$DIR/cfgload" >/dev/null
+rm -f /tmp/.cfgload_emmc.txt
+sync; umount "$DIR"; rmdir "$DIR" 2>/dev/null || true
+
+echo "[5/5] 完成 ✅"
+echo "拔掉 U 盘后重启：盒子 u-boot 的 cfgloademmc 会扫到 eMMC 上的 cfgload → bootm 启动 Corebian。"
+echo "若 eMMC 启动失败，插回 Corebian U 盘仍可正常开机（后路）。"
