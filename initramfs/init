@@ -1,17 +1,27 @@
 #!/usr/bin/busybox sh
+# Corebian 迷你 initramfs init:找到 rootfs 分区，switch_root 进 systemd。
+# vendor 内核内建 ext4 / usb-storage / dwc3 / xhci / mmc，无需在此加载模块。
+# root 设备可由内核 cmdline 的 corebian.root= 指定；否则按常见设备名 + 扫描来找。
 BB=/usr/bin/busybox
 $BB mount -t devtmpfs devtmpfs /dev 2>/dev/null
-$BB mount -t proc proc /proc 2>/dev/null
-$BB mount -t sysfs sysfs /sys 2>/dev/null
+$BB mount -t proc     proc     /proc 2>/dev/null
+$BB mount -t sysfs    sysfs    /sys  2>/dev/null
+$BB mkdir -p /mnt 2>/dev/null
+
 WANT=""
 for a in $($BB cat /proc/cmdline); do case "$a" in corebian.root=*) WANT="${a#corebian.root=}";; esac; done
-try(){ $BB mount "$1" /mnt 2>/dev/null || $BB mount -o ro "$1" /mnt 2>/dev/null || return 1; { [ -x /mnt/sbin/init ] || [ -h /mnt/sbin/init ]; } && return 0; $BB umount /mnt 2>/dev/null; return 1; }
+
+try(){ $BB mount "$1" /mnt 2>/dev/null || $BB mount -o ro "$1" /mnt 2>/dev/null || return 1
+       { [ -x /mnt/sbin/init ] || [ -h /mnt/sbin/init ]; } && return 0
+       $BB umount /mnt 2>/dev/null; return 1; }
+
 i=0
 while [ $i -lt 25 ]; do
   [ -n "$WANT" ] && try "$WANT" && break
-  for d in /dev/system /dev/rootfs /dev/mmcblk0p2 /dev/mmcblk0p7 /dev/sda2; do try "$d" && break; done
+  for d in /dev/sda2 /dev/data /dev/rootfs /dev/mmcblk0p*; do try "$d" && break; done
   { [ -x /mnt/sbin/init ] || [ -h /mnt/sbin/init ]; } && break
   $BB sleep 1; i=$(($i+1))
 done
+
 { [ -x /mnt/sbin/init ] || [ -h /mnt/sbin/init ]; } && exec $BB switch_root /mnt /sbin/init
 exec $BB sh

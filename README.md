@@ -62,6 +62,27 @@ Corebian_<机型>_<用户空间>_<内核版本>_<编译日期YYYYMMDD>.img.gz
 
 `root` / `1234`（首次登录后请自行修改）
 
+## 启动方式
+
+- **U 盘启动（✅ 已完整可用）**：把 Releases 里的 `.img.gz` 烧到 U 盘，插上盒子开机。WiFi + 蓝牙均正常。
+- **安装到 eMMC（⚠️ 遗留问题，见下）**：`corebian-install`（= `armbian-install`）。
+
+## 已知问题：eMMC 安装未解决
+
+`corebian-install` 采用「old-school」工厂分区重用法（重格 `/dev/system` 为 FAT 放启动文件、`/dev/data` 为 ext4 放 rootfs），适用于 e900v22c 这类**锁定/专有分区表**的盒子（ampart 改的分区表这些盒子的 u-boot 不认）。
+
+**已确认工作到**：拔 U 盘从 eMMC 启动时，盒子 env 的 `cfgloademmc` **能扫到 `/dev/system` 上的 cfgload 并 source**（`ce_on_emmc=yes`），`fatload` 内核 + dtb、**`bootm` 也执行了**（探针 `ubst=s3`）。
+
+**卡住的点**：`bootm` 交接后，**内核在 eMMC 启动路径上极早期就崩溃/卡死**——还没到 console（ramoops 空）、没到 initramfs（可靠的 ext4 marker 三次都空）。而**同一个内核、同 dtb、同加载地址、同 bootargs、同 cfgload 机制在 U 盘上完全正常启动**。
+
+**已排除的原因**：
+- `fdtaddr`（env 里已是正确的 `0x1000000`）
+- FAT 碎片化（重格后内核连续写入 `1 extent` 仍失败）
+- 设备命名（init 改扫全部 `/dev/mmcblk0p*` 仍失败）
+- eMMC dtb（已把 vendor dtb 写入 `/dev/dtb` 多重 dtb 仍失败）
+
+**结论**：这种「U 盘能开、eMMC 早期崩」且软件层面完全一致的问题，**需要串口（earlycon）才能看到内核早期日志来定位**。盒子有 `ttyS0`（`earlyprintk=aml-uart,0xff803000`），接一条 USB-TTL 串口线、bootargs 加 `earlycon` 即可一次看清崩在哪。待有串口后继续。
+
 ## 致谢
 
 - [CoreELEC](https://coreelec.org/) —— vendor 内核与驱动
