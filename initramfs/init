@@ -1,0 +1,29 @@
+#!/usr/bin/busybox sh
+# Corebian 迷你 initramfs init:挂载真正的 rootfs 分区，switch_root 进 systemd。
+# vendor 内核内建了 ext4 / usb-storage / dwc3 / xhci / mmc，无需在此加载模块。
+BB=/usr/bin/busybox
+$BB mount -t devtmpfs devtmpfs /dev 2>/dev/null
+$BB mount -t proc     proc     /proc 2>/dev/null
+$BB mount -t sysfs    sysfs    /sys  2>/dev/null
+
+# 允许通过内核 cmdline 覆盖 root 设备；默认 U 盘第二分区
+ROOTDEV=/dev/sda2
+for a in $($BB cat /proc/cmdline); do
+  case "$a" in corebian.root=*) ROOTDEV="${a#corebian.root=}";; esac
+done
+
+$BB echo "=== Corebian initramfs: 等待 root ($ROOTDEV) ==="
+i=0
+while [ $i -lt 30 ]; do
+  [ -b "$ROOTDEV" ] && break
+  $BB sleep 1; i=$(($i+1))
+done
+
+$BB echo "=== Corebian: 挂载 $ROOTDEV ==="
+$BB mount "$ROOTDEV" /mnt 2>/dev/null || $BB mount -o ro "$ROOTDEV" /mnt
+if [ -e /mnt/sbin/init ]; then
+  $BB echo "=== Corebian: switch_root 进用户空间 ==="
+  exec $BB switch_root /mnt /sbin/init
+fi
+$BB echo "=== Corebian: switch_root 失败，进 emergency shell ==="
+exec $BB sh

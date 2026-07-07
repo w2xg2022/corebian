@@ -1,0 +1,13 @@
+[Unit]
+Description=Corebian UWE5621DS WiFi+BT bringup
+After=systemd-modules-load.service
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/corebian-wifibt-up.sh
+
+[Install]
+WantedBy=multi-user.target

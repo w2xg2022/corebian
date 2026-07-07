@@ -1,0 +1,12 @@
+# 大二进制走 Releases，不进 git
+*.img
+*.img.gz
+*.tar.gz
+output/
+blob/
+tmpdisk/
+*.log
+*.ko
+# 但保留板级需要的小二进制
+!boards/**/aml_autoscript
+!boards/**/dtb.img
