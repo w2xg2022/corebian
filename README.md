@@ -2,7 +2,7 @@
 
 **Corebian = CoreELEC + armBian** —— 一套「缝合」固件方案。
 
-把 **CoreELEC 的 vendor 内核**（闭源 Amlogic BSP，能驱动 mainline 驱动不了的硬件，例如 UWE5621DS WiFi/蓝牙）和 **Armbian / Debian 的干净 userland**（systemd + apt）缝合到一起，用 `bootm` + `switch_root` 启动。
+把 **CoreELEC 的 vendor 内核**（闭源 Amlogic BSP，能驱动 mainline 驱动不了的硬件，例如 UWE5621DS WiFi/蓝牙）和 **Armbian 的干净 userland**（基于 Debian，systemd + apt）缝合到一起，用 `bootm` + `switch_root` 启动。
 
 > 适合那些「硬件只有原厂 BSP 内核能驱动，但又想要现代 Debian 用户空间」的 Amlogic 电视盒。
 
@@ -24,7 +24,7 @@
       └─ cfgload → bootm 重打包的 Android kernel.img
           ├─ CoreELEC vendor 内核（原始 lzop 压缩）
           └─ 迷你 initramfs → 挂 rootfs 分区 → switch_root
-              └─ Armbian / Debian rootfs + systemd
+              └─ Armbian rootfs（Debian 系）+ systemd
                   ├─ vendor 内核模块（WiFi/蓝牙驱动，out-of-tree 注入）
                   ├─ vendor 固件（wcnmodem.bin / bt pskey）
                   └─ /opt/ceglibc（自带 glibc 的 sprd hciattach，蓝牙用）
@@ -56,7 +56,7 @@ Corebian_<机型>_<用户空间>_<内核版本>_<编译日期YYYYMMDD>.img.gz
 
 | 机型 | SoC | 无线芯片 | 内核 | 用户空间 | 状态 |
 |------|-----|----------|------|----------|------|
-| E900V22C | S905L3A / G12A | UWE5621DS | 5.15.196 | Trixie | ✅ WiFi + 蓝牙 |
+| E900V22C | S905L3A / G12A | UWE5621DS | 5.15.196 | Armbian (Trixie) | ✅ WiFi + 蓝牙 |
 
 ## 默认账号
 
