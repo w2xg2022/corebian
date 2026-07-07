@@ -70,6 +70,7 @@ mkdir -p "$ROOT/usr/lib/corebian/boot"
 cp "$WORK/kernel.img"        "$ROOT/usr/lib/corebian/boot/kernel.img"
 cp "$BOARD_DIR/$DTB"         "$ROOT/usr/lib/corebian/boot/dtb.img"
 cp "$BOARD_DIR/$CFGLOAD_TXT" "$ROOT/usr/lib/corebian/boot/cfgload.txt"
+cp "$BOARD_DIR/board.conf"   "$ROOT/usr/lib/corebian/boot/board.conf"
 ln -sf corebian-install "$ROOT/usr/sbin/armbian-install"
 
 echo "[5/6] 生成分区镜像"

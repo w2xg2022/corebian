@@ -2,65 +2,74 @@
 # corebian-install —— 把当前运行的 Corebian 系统装到内部 eMMC。
 #
 # 关键区别于 ophub armbian-install：这些盒子原厂 u-boot 只有 bootm、没有 booti，
-# 所以启动链用 bootm（盒子 env 的 cfgloademmc 会扫 eMMC 上的 cfgload → bootm）。
-# 分区/复制沿用 ophub 的 ampart 方案（已验证可靠），只把写入 BOOT 分区的启动文件换成 bootm 版。
+# 启动链走 bootm（盒子 env 的 cfgloademmc 会扫 eMMC 上的 cfgload → bootm）。
+# 分区流程沿用 ophub（ampart 收拢 Amlogic EPT + parted 建 MBR boot/root + dd 保留原厂 u-boot），
+# 只把写入 BOOT 分区的启动文件换成 bootm 版。
 #
-# 依赖 rootfs 内打包的启动素材：/usr/lib/corebian/boot/{kernel.img,dtb.img,cfgload.txt}
+# 依赖打包在 rootfs 的素材：/usr/lib/corebian/boot/{kernel.img,dtb.img,cfgload.txt,board.conf}
 set -e
 [ "$(id -u)" = 0 ] || { echo "需要 root 运行"; exit 1; }
 
 DEV_EMMC="/dev/mmcblk0"
 BOOTSRC="/usr/lib/corebian/boot"
 DIR="/mnt/.corebian-install"
+UBOOT_BAK="/usr/lib/u-boot/mybox-bootloader.img"
 
 echo "========== Corebian eMMC 安装 =========="
 [ -b "$DEV_EMMC" ] || { echo "[✗] 找不到 eMMC：$DEV_EMMC"; exit 1; }
-command -v ampart >/dev/null || { echo "[✗] 缺少 ampart"; exit 1; }
-for f in kernel.img dtb.img cfgload.txt; do
-  [ -f "$BOOTSRC/$f" ] || { echo "[✗] 缺少启动素材 $BOOTSRC/$f"; exit 1; }
-done
-ROOTNOW="$(findmnt -no SOURCE / 2>/dev/null)"
-case "$ROOTNOW" in
-  ${DEV_EMMC}*) echo "[✗] 当前已在 eMMC 上运行，无需安装。"; exit 1;;
-esac
+for t in ampart parted mkfs.vfat mkfs.ext4 rsync mkimage; do command -v $t >/dev/null || { echo "[✗] 缺少 $t"; exit 1; }; done
+for f in kernel.img dtb.img cfgload.txt; do [ -f "$BOOTSRC/$f" ] || { echo "[✗] 缺少 $BOOTSRC/$f"; exit 1; }; done
+# 板级 eMMC 偏移（前若干 MiB 不可写等硬件特性）
+[ -f "$BOOTSRC/board.conf" ] && . "$BOOTSRC/board.conf"
+BLANK1="${EMMC_BLANK1:-117}"; BOOTSZ="${EMMC_BOOT:-512}"; BLANK2="${EMMC_BLANK2:-0}"
+case "$(findmnt -no SOURCE / 2>/dev/null)" in ${DEV_EMMC}*) echo "[✗] 已在 eMMC 运行"; exit 1;; esac
 
-echo "!!! 警告：将用 ampart 重分区 $DEV_EMMC，清空内部 Android，不可逆！"
-echo "    （原厂 u-boot 与 U 盘启动仍是后路，不是硬砖）"
-printf "确认请输入大写 YES："; read -r ok
-[ "$ok" = "YES" ] || { echo "已取消。"; exit 1; }
+echo "!!! 警告：将重分区 $DEV_EMMC，清空内部 Android，不可逆！（原厂 u-boot 与 U 盘启动仍是后路）"
+printf "确认请输入大写 YES："; read -r ok; [ "$ok" = "YES" ] || { echo "已取消。"; exit 1; }
 
-echo "[1/5] 卸载 eMMC 分区并用 ampart 重分区"
+echo "[1/6] 备份原厂 bootloader（前 4M）"
+mkdir -p "$(dirname "$UBOOT_BAK")"
+[ -f "$UBOOT_BAK" ] || dd if="$DEV_EMMC" of="$UBOOT_BAK" bs=1M count=4 conv=fsync 2>/dev/null
+
+echo "[2/6] ampart 收拢 Amlogic EPT"
 for i in $(seq 1 30); do umount -f ${DEV_EMMC}p$i 2>/dev/null || true; done
-ampart "$DEV_EMMC" --mode dclone data::-1:4
-partprobe "$DEV_EMMC" 2>/dev/null || true; sleep 2
-PART_BOOT="${DEV_EMMC}p1"
-PART_ROOT="${DEV_EMMC}p2"
-[ -b "$PART_BOOT" ] && [ -b "$PART_ROOT" ] || { echo "[✗] ampart 后未见 $PART_BOOT / $PART_ROOT"; exit 1; }
+ampart "$DEV_EMMC" --mode dclone data::-1:4 >/dev/null 2>&1 || true
 
-echo "[2/5] 格式化 BOOT(FAT) + ROOTFS(ext4)"
+echo "[3/6] parted 建 MBR：boot(fat32, ${BLANK1}→$((BLANK1+BOOTSZ-1))MiB) + root(ext4)"
+parted -s "$DEV_EMMC" mklabel msdos
+parted -s "$DEV_EMMC" mkpart primary fat32 ${BLANK1}MiB $((BLANK1+BOOTSZ-1))MiB
+parted -s "$DEV_EMMC" mkpart primary ext4  $((BLANK1+BOOTSZ+BLANK2))MiB 100%
+# ampart 动过 Amlogic EPT 后, partprobe 常不生效; 用 blockdev/partx 强制重读
+partprobe "$DEV_EMMC" 2>/dev/null || true
+blockdev --rereadpt "$DEV_EMMC" 2>/dev/null || true
+partx -a "$DEV_EMMC" 2>/dev/null || true
+sleep 3
+PART_BOOT="${DEV_EMMC}p1"; PART_ROOT="${DEV_EMMC}p2"
+[ -b "$PART_BOOT" ] && [ -b "$PART_ROOT" ] || { echo "[✗] 未见 $PART_BOOT/$PART_ROOT"; exit 1; }
+
+echo "[4/6] 格式化 + 复制 rootfs → $PART_ROOT（几分钟）"
 mkfs.vfat -F 32 -n BOOT_EMMC "$PART_BOOT" >/dev/null
 mkfs.ext4 -F -q -L ROOTFS_EMMC "$PART_ROOT"
-
-echo "[3/5] 复制当前 rootfs → $PART_ROOT（可能几分钟）"
 mkdir -p "$DIR"; mount "$PART_ROOT" "$DIR"
 rsync -aHAX \
   --exclude='/proc/*' --exclude='/sys/*' --exclude='/dev/*' --exclude='/run/*' \
-  --exclude='/tmp/*'  --exclude='/mnt/*' --exclude='/media/*' --exclude='/lost+found' \
+  --exclude='/tmp/*' --exclude='/mnt/*' --exclude='/media/*' --exclude='/lost+found' \
   / "$DIR/"
 mkdir -p "$DIR"/{proc,sys,dev,run,tmp,mnt,media,boot}
 printf '%s  /  ext4  defaults,noatime,errors=remount-ro  0 1\n' "$PART_ROOT" > "$DIR/etc/fstab"
 sync; umount "$DIR"
 
-echo "[4/5] 写 bootm 启动素材 → $PART_BOOT"
+echo "[5/6] 写 bootm 启动素材 → $PART_BOOT"
 mount "$PART_BOOT" "$DIR"
 cp "$BOOTSRC/kernel.img" "$BOOTSRC/dtb.img" "$DIR/"
-# 生成 eMMC 版 cfgload：把 root 指向 eMMC 的 rootfs 分区
-sed "s#setenv bootargs \"#setenv bootargs \"corebian.root=$PART_ROOT #" \
-    "$BOOTSRC/cfgload.txt" > /tmp/.cfgload_emmc.txt
+sed "s#setenv bootargs \"#setenv bootargs \"corebian.root=$PART_ROOT #" "$BOOTSRC/cfgload.txt" > /tmp/.cfgload_emmc.txt
 mkimage -A arm -O linux -T script -C none -n cfgload -d /tmp/.cfgload_emmc.txt "$DIR/cfgload" >/dev/null
-rm -f /tmp/.cfgload_emmc.txt
-sync; umount "$DIR"; rmdir "$DIR" 2>/dev/null || true
+rm -f /tmp/.cfgload_emmc.txt; sync; umount "$DIR"; rmdir "$DIR" 2>/dev/null || true
 
-echo "[5/5] 完成 ✅"
-echo "拔掉 U 盘后重启：盒子 u-boot 的 cfgloademmc 会扫到 eMMC 上的 cfgload → bootm 启动 Corebian。"
-echo "若 eMMC 启动失败，插回 Corebian U 盘仍可正常开机（后路）。"
+echo "[6/6] dd 原厂 u-boot 回写（放最后：只动扇区 0，保留 MBR 分区表；避免中途丢分区节点）"
+dd if="$UBOOT_BAK" of="$DEV_EMMC" conv=fsync bs=1 count=444 2>/dev/null
+dd if="$UBOOT_BAK" of="$DEV_EMMC" conv=fsync bs=512 skip=1 seek=1 2>/dev/null
+sync
+
+echo "完成 ✅  拔掉 U 盘后重启 → cfgloademmc 扫到 eMMC 的 cfgload → bootm 启动 Corebian。"
+echo "若失败，插回 Corebian U 盘仍可开机（后路）。"
