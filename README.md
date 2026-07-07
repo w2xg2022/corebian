@@ -1,6 +1,6 @@
 # Corebian
 
-**Corebian = CoreELEC + armBian** —— 一套「缝合」固件方案。
+**Corebian = CoreELEC + Armbian** —— 一套「缝合」固件方案。
 
 把 **CoreELEC 的 vendor 内核**（闭源 Amlogic BSP，能驱动 mainline 驱动不了的硬件，例如 UWE5621DS WiFi/蓝牙）和 **Armbian 的干净 userland**（基于 Debian，systemd + apt）缝合到一起，用 `bootm` + `switch_root` 启动。
 
